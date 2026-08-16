@@ -26,7 +26,6 @@
 
 import Foundation
 
-
 public enum LogOption {
     case `default`
     case none
@@ -107,10 +106,9 @@ public protocol TiercelCompatible {
 
 extension TiercelCompatible {
     public var tr: TiercelWrapper<Self> {
-        get { TiercelWrapper(self) }
+        TiercelWrapper(self)
     }
     public static var tr: TiercelWrapper<Self>.Type {
-        get { TiercelWrapper<Self>.self }
+        TiercelWrapper<Self>.self
     }
 }
-

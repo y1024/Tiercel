@@ -24,7 +24,11 @@
 //  THE SOFTWARE.
 //
 
+import Foundation
+
+#if canImport(UIKit)
 import UIKit
+#endif
 
 public class SessionManager {
     
@@ -635,6 +639,7 @@ extension SessionManager {
     
     private func updateUrlMapper(with task: DownloadTask) {
         $mutableState.write { $0.urlMap[task.currentURL] = task.url }
+        storeTasks()
     }
     
     private func restoreStatus() {
@@ -698,9 +703,11 @@ extension SessionManager {
         guard mutableState.status != .running else { return }
         
         if isControlNetworkActivityIndicator {
+#if canImport(UIKit) && !os(visionOS)
             DispatchQueue.tr.executeOnMain {
                 UIApplication.shared.isNetworkActivityIndicatorVisible = true
             }
+#endif
         }
         createTimer()
         mutableState.status = .running
@@ -865,9 +872,11 @@ extension SessionManager {
         log(.sessionManager(self, message: newValue.rawValue))
         if newValue == .canceled || newValue == .removed || newValue == .succeeded || newValue == .failed {
             if isControlNetworkActivityIndicator {
+#if canImport(UIKit) && !os(visionOS)
                 DispatchQueue.tr.executeOnMain {
                     UIApplication.shared.isNetworkActivityIndicatorVisible = false
                 }
+#endif
             }
         }
     }

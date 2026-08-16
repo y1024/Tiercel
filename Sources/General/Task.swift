@@ -189,25 +189,24 @@ public class Task<TaskType>: NSObject, Codable {
         try container.encode(url, forKey: .url)
         try container.encode(progress.totalUnitCount, forKey: .totalBytes)
         try container.encode(progress.completedUnitCount, forKey: .completedBytes)
-        try $mutableState.read {
-            try container.encode($0.currentURL, forKey: .currentURL)
-            try container.encode($0.fileName, forKey: .fileName)
-            try container.encodeIfPresent($0.headers, forKey: .headers)
-            try container.encode($0.startDate, forKey: .startDate)
-            try container.encode($0.endDate, forKey: .endDate)
-            try container.encode($0.status.rawValue, forKey: .status)
-            try container.encodeIfPresent($0.verificationCode, forKey: .verificationCode)
-            try container.encode($0.verificationType.rawValue, forKey: .verificationType)
-            try container.encode($0.validation.rawValue, forKey: .validation)
-            if let error = $0.error {
-                let errorData: Data
-                if #available(iOS 11.0, *) {
-                    errorData = try NSKeyedArchiver.archivedData(withRootObject: (error as NSError), requiringSecureCoding: true)
-                } else {
-                    errorData = NSKeyedArchiver.archivedData(withRootObject: (error as NSError))
-                }
-                try container.encode(errorData, forKey: .error)
+        let state = $mutableState.read { $0 }
+        try container.encode(state.currentURL, forKey: .currentURL)
+        try container.encode(state.fileName, forKey: .fileName)
+        try container.encodeIfPresent(state.headers, forKey: .headers)
+        try container.encode(state.startDate, forKey: .startDate)
+        try container.encode(state.endDate, forKey: .endDate)
+        try container.encode(state.status.rawValue, forKey: .status)
+        try container.encodeIfPresent(state.verificationCode, forKey: .verificationCode)
+        try container.encode(state.verificationType.rawValue, forKey: .verificationType)
+        try container.encode(state.validation.rawValue, forKey: .validation)
+        if let error = state.error {
+            let errorData: Data
+            if #available(iOS 11.0, *) {
+                errorData = try NSKeyedArchiver.archivedData(withRootObject: (error as NSError), requiringSecureCoding: true)
+            } else {
+                errorData = NSKeyedArchiver.archivedData(withRootObject: (error as NSError))
             }
+            try container.encode(errorData, forKey: .error)
         }
 
     }
@@ -281,5 +280,4 @@ extension Task {
     }
     
 }
-
 

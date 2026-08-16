@@ -24,7 +24,11 @@
 //  THE SOFTWARE.
 //
 
+import Foundation
+
+#if canImport(UIKit)
 import UIKit
+#endif
 
 public protocol DownloadTaskDelegate: TaskDelegate {
     func downloadTaskFileExists(_ task: DownloadTask)
@@ -107,18 +111,21 @@ public class DownloadTask: Task<DownloadTask> {
         if let fileName = fileName, !fileName.isEmpty {
             self.mutableState.fileName = fileName
         }
+#if canImport(UIKit)
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(fixDelegateMethodError),
                                                name: UIApplication.didBecomeActiveNotification,
                                                object: nil)
+#endif
     }
     
     public override func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         let superEncoder = container.superEncoder()
         try super.encode(to: superEncoder)
-        try container.encodeIfPresent(mutableDownloadState.resumeData, forKey: .resumeData)
-        if let response = response {
+        let downloadState = $mutableDownloadState.read { $0 }
+        try container.encodeIfPresent(downloadState.resumeData, forKey: .resumeData)
+        if let response = downloadState.response ?? downloadState.underlyingDownloadTask?.response as? HTTPURLResponse {
             let responseData: Data
             if #available(iOS 11.0, *) {
                 responseData = try NSKeyedArchiver.archivedData(withRootObject: (response as HTTPURLResponse), requiringSecureCoding: true)
@@ -265,9 +272,9 @@ extension DownloadTask {
             }
             mutableDownloadState.underlyingDownloadTask = underlyingDownloadTask
             progress.setUserInfoObject(progress.completedUnitCount, forKey: .fileCompletedCountKey)
+            underlyingDownloadTask.resume()
             delegate?.taskDidStart(self)
             executeControl()
-            underlyingDownloadTask.resume()
         }
     }
     
@@ -292,6 +299,9 @@ extension DownloadTask {
     func cancel(onMainQueue: Bool = true, handler: Handler<DownloadTask>? = nil) {
         $mutableState.write {
             guard $0.status != .succeeded else { return }
+            guard $0.status != .willSuspend,
+                  $0.status != .willCancel,
+                  $0.status != .willRemove else { return }
             $0.controlExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
             if $0.status == .running {
                 $0.status = .willCancel
@@ -311,6 +321,9 @@ extension DownloadTask {
     func remove(completely: Bool = false, onMainQueue: Bool = true, handler: Handler<DownloadTask>? = nil) {
         dispatchPrecondition(condition: .onQueue(operationQueue))
         $mutableState.write {
+            guard $0.status != .willSuspend,
+                  $0.status != .willCancel,
+                  $0.status != .willRemove else { return }
             $0.isRemoveCompletely = completely
             $0.controlExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
             if $0.status == .running {
