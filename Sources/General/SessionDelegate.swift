@@ -28,6 +28,12 @@ import Foundation
 
 protocol SessionStateProvider: AnyObject {
     func task<TaskType, R: Task<TaskType>>(for url: URL, as type: R.Type) -> R?
+
+    func task<TaskType, R: Task<TaskType>>(for sessionTask: URLSessionTask, as type: R.Type) -> R?
+
+    func shouldDiscardCallbacks(for sessionTask: URLSessionTask) -> Bool
+
+    func didFinishDiscardedTransfer(_ sessionTask: URLSessionTask)
     
     func didBecomeInvalidation(withError error: Error?)
         
@@ -42,16 +48,22 @@ class SessionDelegate: NSObject {
 
     func task<TaskType, R: Task<TaskType>>(for url: URL, as type: R.Type) -> R? {
         guard let provider = stateProvider else {
-            assertionFailure("StateProvider is nil.")
             return nil
         }
 
         return provider.task(for: url, as: type)
     }
+
+    func task<TaskType, R: Task<TaskType>>(for sessionTask: URLSessionTask, as type: R.Type) -> R? {
+        guard let provider = stateProvider else {
+            return nil
+        }
+
+        return provider.task(for: sessionTask, as: type)
+    }
     
     func handle(_ error: Error, message: String) {
         guard let provider = stateProvider else {
-            assertionFailure("StateProvider is nil.")
             return
         }
         provider.log(error, message: message)
@@ -71,6 +83,14 @@ extension SessionDelegate: URLSessionDownloadDelegate {
     
     
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        if stateProvider?.shouldDiscardCallbacks(for: downloadTask) == true { return }
+        if let task = task(for: downloadTask, as: DownloadTask.self) {
+            task.didWriteData(downloadTask: downloadTask,
+                              bytesWritten: bytesWritten,
+                              totalBytesWritten: totalBytesWritten,
+                              totalBytesExpectedToWrite: totalBytesExpectedToWrite)
+            return
+        }
         guard let currentURL = downloadTask.currentRequest?.url else { return }
         guard let task = task(for: currentURL, as: DownloadTask.self) else {
             handle(TiercelError.fetchDownloadTaskFailed(url: currentURL),
@@ -82,6 +102,11 @@ extension SessionDelegate: URLSessionDownloadDelegate {
     
     
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        if stateProvider?.shouldDiscardCallbacks(for: downloadTask) == true { return }
+        if let task = task(for: downloadTask, as: DownloadTask.self) {
+            task.didFinishDownloading(task: downloadTask, to: location)
+            return
+        }
         guard let currentURL = downloadTask.currentRequest?.url else { return }
         guard let task = task(for: currentURL, as: DownloadTask.self) else {
             handle(TiercelError.fetchDownloadTaskFailed(url: currentURL),
@@ -92,13 +117,22 @@ extension SessionDelegate: URLSessionDownloadDelegate {
     }
     
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let currentURL = task.currentRequest?.url {
+        if stateProvider?.shouldDiscardCallbacks(for: task) == true {
+            stateProvider?.didFinishDiscardedTransfer(task)
+            return
+        }
+        guard let sessionTask = task as? URLSessionDownloadTask else { return }
+        if let downloadTask = self.task(for: sessionTask, as: DownloadTask.self) {
+            downloadTask.didComplete(task: sessionTask, error: error)
+            return
+        }
+        if let currentURL = sessionTask.currentRequest?.url {
             guard let downloadTask = self.task(for: currentURL, as: DownloadTask.self) else {
                 handle(TiercelError.fetchDownloadTaskFailed(url: currentURL),
                        message: "urlSession(_:task:didCompleteWithError:)")
                 return
             }
-            downloadTask.didComplete(.network(task: task, error: error))
+            downloadTask.didComplete(task: sessionTask, error: error)
         } else {
             // url 不合法
             if let error = error {
@@ -110,7 +144,7 @@ extension SessionDelegate: URLSessionDownloadDelegate {
                         handle(error, message: "urlSession(_:task:didCompleteWithError:)")
                         return
                     }
-                    downloadTask.didComplete(.network(task: task, error: error))
+                    downloadTask.didComplete(task: sessionTask, error: error)
                 } else {
                     handle(error, message: "urlSession(_:task:didCompleteWithError:)")
                 }

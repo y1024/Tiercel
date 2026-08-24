@@ -62,27 +62,14 @@ final public class UnfairLock {
     }
 }
 
-@propertyWrapper
 final public class Protected<T> {
     
     private let lock = UnfairLock()
     
     private var value: T
     
-    public var wrappedValue: T {
-        get { lock.around { value } }
-        set { lock.around { value = newValue } }
-    }
-    
-    public var projectedValue: Protected<T> { self }
-
-
     public init(_ value: T) {
         self.value = value
-    }
-    
-    public init(wrappedValue: T) {
-        value = wrappedValue
     }
 
     public func read<U>(_ closure: (T) throws -> U) rethrows -> U {
@@ -93,6 +80,10 @@ final public class Protected<T> {
     @discardableResult
     public func write<U>(_ closure: (inout T) throws -> U) rethrows -> U {
         return try lock.around { try closure(&self.value) }
+    }
+
+    public func write(_ value: T) {
+        write { $0 = value }
     }
 }
 
@@ -164,4 +155,3 @@ final public class Throttler {
         }
     }
 }
-

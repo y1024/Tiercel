@@ -155,12 +155,10 @@ extension BaseViewController: UITableViewDataSource, UITableViewDelegate {
     
     // 每个 cell 中的状态更新，应该在 willDisplay 中执行
     func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
-        
+                
         guard let task = sessionManager.tasks.safeObject(at: indexPath.row),
               let cell = cell as? DownloadTaskCell
         else { return }
-        
-        cell.task = task
         
         cell.titleLabel.text = task.fileName
         
@@ -169,12 +167,12 @@ extension BaseViewController: UITableViewDataSource, UITableViewDelegate {
         cell.tapClosure = { [weak self] cell in
             guard let task = self?.sessionManager.tasks.safeObject(at: indexPath.row) else { return }
             switch task.status {
-                case .waiting, .running:
-                    self?.sessionManager.suspend(task)
-                case .suspended, .failed:
-                    self?.sessionManager.start(task)
-                default:
-                    break
+            case .waiting, .running:
+                self?.sessionManager.suspend(task)
+            case .suspended, .failed:
+                self?.sessionManager.start(task)
+            default:
+                break
             }
         }
         
@@ -204,6 +202,9 @@ extension BaseViewController: UITableViewDataSource, UITableViewDelegate {
         }
     }
     
+    func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        sessionManager.tasks.safeObject(at: indexPath.row)?.progress { _ in }.success { _ in }.failure { _ in }
+    }
     
     func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
         return true

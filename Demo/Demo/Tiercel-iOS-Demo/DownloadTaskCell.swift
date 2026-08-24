@@ -25,8 +25,6 @@ class DownloadTaskCell: UITableViewCell {
     
     var tapClosure: ((DownloadTaskCell) -> Void)?
     
-    var task: DownloadTask?
-
 
     @IBAction func didTapButton(_ sender: Any) {
         tapClosure?(self)
@@ -67,7 +65,7 @@ class DownloadTaskCell: UITableViewCell {
     
     override func prepareForReuse() {
         super.prepareForReuse()
-        task?.progress { _ in }.success { _ in }.failure { _ in }
+        progressView.progress = 0
     }
 
 }

@@ -29,6 +29,8 @@ import Foundation
 public class Cache {
     
     private let ioQueue: DispatchQueue
+
+    private let ioQueueKey = DispatchSpecificKey<Void>()
     
     private var debouncer: Debouncer
     
@@ -67,6 +69,7 @@ public class Cache {
         
         let ioQueueName = "com.Tiercel.Cache.ioQueue.\(identifier)"
         ioQueue = DispatchQueue(label: ioQueueName, autoreleaseFrequency: .workItem)
+        ioQueue.setSpecific(key: ioQueueKey, value: ())
         
         debouncer = Debouncer(timeInterval: .milliseconds(200))
         
@@ -91,38 +94,50 @@ public class Cache {
     
 }
 
+private extension Cache {
+    /// Cache operations may call other cache operations. Execute inline when already
+    /// on the I/O queue so every filesystem access stays serialized without deadlocking.
+    func syncIO<T>(_ work: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: ioQueueKey) != nil {
+            return try work()
+        }
+        return try ioQueue.sync(execute: work)
+    }
+}
+
 
 // MARK: - file
 extension Cache {
     func createDirectory() {
-        
-        if !fileManager.fileExists(atPath: downloadPath) {
-            do {
-                try fileManager.createDirectory(atPath: downloadPath, withIntermediateDirectories: true, attributes: nil)
-            } catch  {
-                logger?.log(.error(TiercelError.cacheError(reason: .cannotCreateDirectory(path: downloadPath,
-                                                                                          error: error)),
-                                   message: "create directory failed"))
+        syncIO {
+            if !fileManager.fileExists(atPath: downloadPath) {
+                do {
+                    try fileManager.createDirectory(atPath: downloadPath, withIntermediateDirectories: true, attributes: nil)
+                } catch  {
+                    logger?.log(.error(TiercelError.cacheError(reason: .cannotCreateDirectory(path: downloadPath,
+                                                                                              error: error)),
+                                       message: "create directory failed"))
+                }
             }
-        }
-        
-        if !fileManager.fileExists(atPath: downloadTmpPath) {
-            do {
-                try fileManager.createDirectory(atPath: downloadTmpPath, withIntermediateDirectories: true, attributes: nil)
-            } catch  {
-                logger?.log(.error(TiercelError.cacheError(reason: .cannotCreateDirectory(path: downloadTmpPath,
-                                                                                          error: error)),
-                                   message: "create directory failed"))
+
+            if !fileManager.fileExists(atPath: downloadTmpPath) {
+                do {
+                    try fileManager.createDirectory(atPath: downloadTmpPath, withIntermediateDirectories: true, attributes: nil)
+                } catch  {
+                    logger?.log(.error(TiercelError.cacheError(reason: .cannotCreateDirectory(path: downloadTmpPath,
+                                                                                              error: error)),
+                                       message: "create directory failed"))
+                }
             }
-        }
-        
-        if !fileManager.fileExists(atPath: downloadFilePath) {
-            do {
-                try fileManager.createDirectory(atPath: downloadFilePath, withIntermediateDirectories: true, attributes: nil)
-            } catch {
-                logger?.log(.error(TiercelError.cacheError(reason: .cannotCreateDirectory(path: downloadFilePath,
-                                                                                          error: error)),
-                                   message: "create directory failed"))
+
+            if !fileManager.fileExists(atPath: downloadFilePath) {
+                do {
+                    try fileManager.createDirectory(atPath: downloadFilePath, withIntermediateDirectories: true, attributes: nil)
+                } catch {
+                    logger?.log(.error(TiercelError.cacheError(reason: .cannotCreateDirectory(path: downloadFilePath,
+                                                                                              error: error)),
+                                       message: "create directory failed"))
+                }
             }
         }
     }
@@ -143,7 +158,7 @@ extension Cache {
     
     public func fileExists(fileName: String) -> Bool {
         guard let path = filePath(fileName: fileName) else { return false }
-        return fileManager.fileExists(atPath: path)
+        return syncIO { fileManager.fileExists(atPath: path) }
     }
     
     public func filePath(url: URLConvertible) -> String? {
@@ -163,7 +178,7 @@ extension Cache {
     
     public func fileExists(url: URLConvertible) -> Bool {
         guard let path = filePath(url: url) else { return false }
-        return fileManager.fileExists(atPath: path)
+        return syncIO { fileManager.fileExists(atPath: path) }
     }
     
     
@@ -190,7 +205,7 @@ extension Cache {
 // MARK: - retrieve
 extension Cache {
     func retrieveAllTasks(with operationQueue: DispatchQueue) -> [DownloadTask] {
-        return ioQueue.sync {
+        return syncIO {
             let path = (downloadPath as NSString).appendingPathComponent("\(identifier)_Tasks.plist")
             if fileManager.fileExists(atPath: path) {
                 do {
@@ -199,8 +214,24 @@ extension Cache {
                     let decoder = PropertyListDecoder()
                     decoder.userInfo[.cache] = self
                     decoder.userInfo[.operationQueue] = operationQueue
-                    let tasks = try decoder.decode([DownloadTask].self, from: data)
-                    return tasks
+                    // 逐条解码：单个损坏条目只被跳过，不拖垮整个任务列表
+                    let items = try PropertyListSerialization.propertyList(from: data,
+                                                                           options: [],
+                                                                           format: nil) as? [[String: Any]]
+                    guard let items = items else { return [DownloadTask]() }
+                    return items.compactMap { item in
+                        guard let itemData = try? PropertyListSerialization.data(fromPropertyList: item,
+                                                                                 format: .binary,
+                                                                                 options: 0),
+                              let task = try? decoder.decode(DownloadTask.self, from: itemData) else {
+                            let urlDescription = (item["url"] as? [String: Any])?["relative"] ?? "unknown"
+                            logger?.log(.error(TiercelError.cacheError(reason: .cannotRetrieveAllTasks(path: path,
+                                                                                                      error: TiercelError.unknown)),
+                                               message: "skip corrupted task entry, url: \(urlDescription)"))
+                            return nil
+                        }
+                        return task
+                    }
                 } catch {
                     logger?.log(.error(TiercelError.cacheError(reason: .cannotRetrieveAllTasks(path: path, error: error)),
                                        message: "retrieve all tasks failed"))
@@ -213,7 +244,7 @@ extension Cache {
     }
     
     func retrieveTmpFile(_ tmpFileName: String) -> Bool {
-        return ioQueue.sync {
+        return syncIO {
             guard !tmpFileName.isEmpty else { return false }
             let backupFilePath = (downloadTmpPath as NSString).appendingPathComponent(tmpFileName)
             let originFilePath = (NSTemporaryDirectory() as NSString).appendingPathComponent(tmpFileName)
@@ -268,7 +299,7 @@ extension Cache {
     }
     
     func storeFile(at srcURL: URL, to dstURL: URL) {
-        ioQueue.sync {
+        syncIO {
             do {
                 try fileManager.moveItem(at: srcURL, to: dstURL)
             } catch {
@@ -281,7 +312,7 @@ extension Cache {
     }
     
     func storeTmpFile(_ tmpFileName: String) {
-        ioQueue.sync {
+        syncIO {
             guard !tmpFileName.isEmpty else { return }
             let tmpPath = (NSTemporaryDirectory() as NSString).appendingPathComponent(tmpFileName)
             let destination = (downloadTmpPath as NSString).appendingPathComponent(tmpFileName)
@@ -308,7 +339,7 @@ extension Cache {
     }
     
     func updateFileName(_ oldFileName: String, to newFileName: String) {
-        ioQueue.sync {
+        syncIO {
             guard let oldfilePath = filePath(fileName: oldFileName) else { return }
             guard fileManager.fileExists(atPath: oldfilePath) else { return }
             let newFilePath = self.filePath(fileName: newFileName)!
@@ -328,51 +359,58 @@ extension Cache {
 // MARK: - remove
 extension Cache {
     func remove(_ task: DownloadTask, completely: Bool) {
-        if let tmpFileName = task.mutableDownloadState.resumeData?.tmpFileName {
-            removeTmpFile(tmpFileName)
-        }
-        
-        if completely {
-            removeFile(task.filePath)
-        }
-    }
-    
-    func removeFile(_ filePath: String) {
-        ioQueue.async {
-            if self.fileManager.fileExists(atPath: filePath) {
-                do {
-                    try self.fileManager.removeItem(atPath: filePath)
-                } catch {
-                    self.logger?.log(.error(TiercelError.cacheError(reason: .cannotRemoveItem(path: filePath,
-                                                                                              error: error)),
-                                            message: "remove file failed"))
-                }
+        syncIO {
+            if let tmpFileName = task.resumeDataTmpFileName {
+                removeTmpFileOnIOQueue(tmpFileName)
+            }
+
+            if completely {
+                removeFileOnIOQueue(task.filePath)
             }
         }
     }
     
-    
+    func removeFile(_ filePath: String) {
+        syncIO {
+            removeFileOnIOQueue(filePath)
+        }
+    }
+
+    private func removeFileOnIOQueue(_ filePath: String) {
+        if fileManager.fileExists(atPath: filePath) {
+            do {
+                try fileManager.removeItem(atPath: filePath)
+            } catch {
+                logger?.log(.error(TiercelError.cacheError(reason: .cannotRemoveItem(path: filePath,
+                                                                                      error: error)),
+                                   message: "remove file failed"))
+            }
+        }
+    }
     
     /// 删除保留在本地的缓存文件
     ///
     /// - Parameter task:
     func removeTmpFile(_ tmpFileName: String) {
-        ioQueue.async {
-            guard !tmpFileName.isEmpty else { return }
-            let path1 = (self.downloadTmpPath as NSString).appendingPathComponent(tmpFileName)
-            let path2 = (NSTemporaryDirectory() as NSString).appendingPathComponent(tmpFileName)
-            [path1, path2].forEach { (path) in
-                if self.fileManager.fileExists(atPath: path) {
-                    do {
-                        try self.fileManager.removeItem(atPath: path)
-                    } catch {
-                        self.logger?.log(.error(TiercelError.cacheError(reason: .cannotRemoveItem(path: path,
-                                                                                                  error: error)),
-                                                message: "remove tmpFile failed"))
-                    }
+        syncIO {
+            removeTmpFileOnIOQueue(tmpFileName)
+        }
+    }
+
+    private func removeTmpFileOnIOQueue(_ tmpFileName: String) {
+        guard !tmpFileName.isEmpty else { return }
+        let path1 = (downloadTmpPath as NSString).appendingPathComponent(tmpFileName)
+        let path2 = (NSTemporaryDirectory() as NSString).appendingPathComponent(tmpFileName)
+        [path1, path2].forEach { path in
+            if fileManager.fileExists(atPath: path) {
+                do {
+                    try fileManager.removeItem(atPath: path)
+                } catch {
+                    logger?.log(.error(TiercelError.cacheError(reason: .cannotRemoveItem(path: path,
+                                                                                          error: error)),
+                                       message: "remove tmpFile failed"))
                 }
             }
-            
         }
     }
 }

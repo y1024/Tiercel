@@ -43,6 +43,11 @@ public protocol TaskDelegate: AnyObject {
     func taskDidUpdateProgress<TaskType>(_ task: Task<TaskType>)
     
     func taskDidCompleteFromRunning<TaskType>(_ task: Task<TaskType>)
+
+}
+
+protocol UnderlyingTaskDelegate: AnyObject {
+    func taskDidFinishUnderlyingTask<TaskType>(_ task: Task<TaskType>, sessionTask: URLSessionTask)
 }
 
 
@@ -72,17 +77,6 @@ public class Task<TaskType>: NSObject, Codable {
         case error
     }
     
-    enum CompletionType {
-        case local
-        case network(task: URLSessionTask, error: Error?)
-    }
-    
-    enum InterruptType {
-        case manual(_ fromRunningTask: Bool)
-        case error(_ error: Error)
-        case statusCode(_ statusCode: Int)
-    }
-
     weak var delegate: TaskDelegate?
 
     let cache: Cache
@@ -97,7 +91,6 @@ public class Task<TaskType>: NSObject, Codable {
         var headers: [String: String]?
         var verificationCode: String?
         var verificationType: FileChecksumHelper.VerificationType = .md5
-        var isRemoveCompletely: Bool = false
         var status: Status = .waiting
         var validation: Validation = .unkown
         var currentURL: URL
@@ -116,23 +109,22 @@ public class Task<TaskType>: NSObject, Codable {
         var validateExecuter: Executer<TaskType>?
     }
     
-    @Protected
-    var mutableState: MutableState
+    let mutableState: Protected<MutableState>
 
     public var status: Status {
-        mutableState.status
+        mutableState.read { $0.status }
     }
     
     var currentURL: URL {
-        mutableState.currentURL
+        mutableState.read { $0.currentURL }
     }
     
     public var validation: Validation {
-        mutableState.validation
+        mutableState.read { $0.validation }
     }
     
     public var startDate: Double {
-        mutableState.startDate
+        mutableState.read { $0.startDate }
     }
     
     public var startDateString: String {
@@ -140,7 +132,7 @@ public class Task<TaskType>: NSObject, Codable {
     }
 
     public var endDate: Double {
-        mutableState.endDate
+        mutableState.read { $0.endDate }
     }
     
     public var endDateString: String {
@@ -149,7 +141,7 @@ public class Task<TaskType>: NSObject, Codable {
 
 
     public var speed: Int64 {
-        mutableState.speed
+        mutableState.read { $0.speed }
     }
     
     public var speedString: String {
@@ -158,11 +150,11 @@ public class Task<TaskType>: NSObject, Codable {
 
     /// 默认为url的md5加上文件扩展名
     public var fileName: String {
-        mutableState.fileName
+        mutableState.read { $0.fileName }
     }
 
     public  var timeRemaining: Int64 {
-        mutableState.timeRemaining
+        mutableState.read { $0.timeRemaining }
     }
     
     public var timeRemainingString: String {
@@ -170,7 +162,7 @@ public class Task<TaskType>: NSObject, Codable {
     }
 
     public var error: Error? {
-        mutableState.error
+        mutableState.read { $0.error }
     }
 
     init(_ url: URL,
@@ -180,7 +172,7 @@ public class Task<TaskType>: NSObject, Codable {
         self.cache = cache
         self.url = url
         self.operationQueue = operationQueue
-        mutableState = MutableState(headers: headers, currentURL: url, fileName: url.tr.fileName)
+        mutableState = Protected(MutableState(headers: headers, currentURL: url, fileName: url.tr.fileName))
         super.init()
     }
     
@@ -189,7 +181,7 @@ public class Task<TaskType>: NSObject, Codable {
         try container.encode(url, forKey: .url)
         try container.encode(progress.totalUnitCount, forKey: .totalBytes)
         try container.encode(progress.completedUnitCount, forKey: .completedBytes)
-        let state = $mutableState.read { $0 }
+        let state = mutableState.read { $0 }
         try container.encode(state.currentURL, forKey: .currentURL)
         try container.encode(state.fileName, forKey: .fileName)
         try container.encodeIfPresent(state.headers, forKey: .headers)
@@ -200,12 +192,8 @@ public class Task<TaskType>: NSObject, Codable {
         try container.encode(state.verificationType.rawValue, forKey: .verificationType)
         try container.encode(state.validation.rawValue, forKey: .validation)
         if let error = state.error {
-            let errorData: Data
-            if #available(iOS 11.0, *) {
-                errorData = try NSKeyedArchiver.archivedData(withRootObject: (error as NSError), requiringSecureCoding: true)
-            } else {
-                errorData = NSKeyedArchiver.archivedData(withRootObject: (error as NSError))
-            }
+            let errorData = try NSKeyedArchiver.archivedData(withRootObject: error as NSError,
+                                                             requiringSecureCoding: true)
             try container.encode(errorData, forKey: .error)
         }
 
@@ -216,32 +204,60 @@ public class Task<TaskType>: NSObject, Codable {
         url = try container.decode(URL.self, forKey: .url)
         let currentURL = try container.decode(URL.self, forKey: .currentURL)
         let fileName = try container.decode(String.self, forKey: .fileName)
-        mutableState = MutableState(currentURL: currentURL, fileName: fileName)
-        cache = decoder.userInfo[.cache] as! Cache
-        operationQueue = decoder.userInfo[.operationQueue] as! DispatchQueue
+        mutableState = Protected(MutableState(currentURL: currentURL, fileName: fileName))
+        guard let cache = decoder.userInfo[.cache] as? Cache else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                    debugDescription: "Missing Cache in decoder.userInfo"))
+        }
+        guard let operationQueue = decoder.userInfo[.operationQueue] as? DispatchQueue else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                    debugDescription: "Missing operationQueue in decoder.userInfo"))
+        }
+        self.cache = cache
+        self.operationQueue = operationQueue
         super.init()
 
         progress.totalUnitCount = try container.decode(Int64.self, forKey: .totalBytes)
         progress.completedUnitCount = try container.decode(Int64.self, forKey: .completedBytes)
         
-        try $mutableState.write {
+        try mutableState.write {
             $0.headers = try container.decodeIfPresent([String: String].self, forKey: .headers)
             $0.startDate = try container.decode(Double.self, forKey: .startDate)
             $0.endDate = try container.decode(Double.self, forKey: .endDate)
             $0.verificationCode = try container.decodeIfPresent(String.self, forKey: .verificationCode)
             let statusString = try container.decode(String.self, forKey: .status)
-            let status = Status(rawValue: statusString)!
-            $0.status = status == .waiting ? .suspended : status
+            guard let status = Status(rawValue: statusString) else {
+                throw DecodingError.dataCorruptedError(forKey: .status,
+                                                       in: container,
+                                                       debugDescription: "Unknown task status: \(statusString)")
+            }
+            switch status {
+            case .waiting, .willSuspend:
+                $0.status = .suspended
+            case .willCancel:
+                $0.status = .canceled
+            case .willRemove:
+                $0.status = .removed
+            default:
+                $0.status = status
+            }
             let verificationTypeInt = try container.decode(Int.self, forKey: .verificationType)
-            $0.verificationType = FileChecksumHelper.VerificationType(rawValue: verificationTypeInt)!
+            guard let verificationType = FileChecksumHelper.VerificationType(rawValue: verificationTypeInt) else {
+                throw DecodingError.dataCorruptedError(forKey: .verificationType,
+                                                       in: container,
+                                                       debugDescription: "Unknown verification type: \(verificationTypeInt)")
+            }
+            $0.verificationType = verificationType
             let validationType = try container.decode(Int.self, forKey: .validation)
-            $0.validation = Validation(rawValue: validationType)!
+            guard let validation = Validation(rawValue: validationType) else {
+                throw DecodingError.dataCorruptedError(forKey: .validation,
+                                                       in: container,
+                                                       debugDescription: "Unknown validation state: \(validationType)")
+            }
+            $0.validation = validation
             if let errorData = try container.decodeIfPresent(Data.self, forKey: .error) {
-                if #available(iOS 11.0, *) {
-                    $0.error = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSError.self, from: errorData)
-                } else {
-                    $0.error = NSKeyedUnarchiver.unarchiveObject(with: errorData) as? NSError
-                }
+                $0.error = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSError.self,
+                                                                   from: errorData)
             }
         }
     }
@@ -256,28 +272,64 @@ public class Task<TaskType>: NSObject, Codable {
 extension Task {
     @discardableResult
     public func progress(onMainQueue: Bool = true, handler: @escaping Handler<TaskType>) -> Self {
-        mutableState.progressExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
+        mutableState.write {
+            $0.progressExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
+        }
         return self
     }
 
     @discardableResult
     public func success(onMainQueue: Bool = true, handler: @escaping Handler<TaskType>) -> Self {
-        mutableState.successExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
+        let executer = Executer(onMainQueue: onMainQueue, handler: handler)
+        let shouldReplay = mutableState.write {
+            $0.successExecuter = executer
+            return $0.status == .succeeded && $0.completionExecuter == nil
+        }
+        if shouldReplay {
+            operationQueue.async {
+                self.execute(executer)
+            }
+        }
         return self
 
     }
 
     @discardableResult
     public func failure(onMainQueue: Bool = true, handler: @escaping Handler<TaskType>) -> Self {
-        mutableState.failureExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
+        let executer = Executer(onMainQueue: onMainQueue, handler: handler)
+        let shouldReplay = mutableState.write {
+            $0.failureExecuter = executer
+            return $0.completionExecuter == nil &&
+                ($0.status == .suspended ||
+                 $0.status == .canceled ||
+                 $0.status == .removed ||
+                 $0.status == .failed)
+        }
+        if shouldReplay {
+            operationQueue.async {
+                self.execute(executer)
+            }
+        }
         return self
     }
     
     @discardableResult
     public func completion(onMainQueue: Bool = true, handler: @escaping Handler<TaskType>) -> Self {
-        mutableState.completionExecuter = Executer(onMainQueue: onMainQueue, handler: handler)
+        let executer = Executer(onMainQueue: onMainQueue, handler: handler)
+        let shouldReplay = mutableState.write {
+            $0.completionExecuter = executer
+            return $0.status == .suspended ||
+                $0.status == .canceled ||
+                $0.status == .removed ||
+                $0.status == .succeeded ||
+                $0.status == .failed
+        }
+        if shouldReplay {
+            operationQueue.async {
+                self.execute(executer)
+            }
+        }
         return self
     }
     
 }
-
